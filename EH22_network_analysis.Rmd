@@ -1,0 +1,758 @@
+---
+title: "DESeq2"
+output: html_document
+date: "2024-09-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(DESeq2)
+library(tidyverse)
+library(Matrix)
+library(igraph)
+library(magrittr) 
+library(dplyr)
+library(SpiecEasi)
+library(otuSummary)
+library(reshape2) # has the melt function, which I use to wrangle data
+pass <- function(x){x}
+```
+
+
+```{r setup, include=FALSE}
+convertSEToTable <- function(se_out,sp.names,type.name){
+  #This is just a fancy helper function to get the data in a comparable format to the output of lesson 1 so we can make a similar plot. We will cover other methods for visualizing this type of output in future lessons.
+  if (type.name=='glasso'){
+     secor <- cov2cor(as.matrix(getOptCov(se_out))) # See spieceasi documentation for how to pull out weights for comparison
+    mat<-secor*getRefit(se_out)
+    mat[lower.tri(mat)] <- 0
+    elist     <- summary(mat)
+  }else {
+    sebeta <- symBeta(getOptBeta(se_out), mode='maxabs')
+    elist<- summary(sebeta)
+  }
+ 
+  elist[,1] <- sp.names[elist[,1]]
+  elist[,2] <- sp.names[elist[,2]]
+  elist[,4] <- paste(elist[,1],elist[,2])
+  full_e <- expand.grid(sp.names,sp.names)
+  rownames(full_e) <- paste(full_e[,1],full_e[,2])
+  full_e[,"Weight"] <- 0
+  full_e[elist[,4],"Weight"] <- elist[,3]
+  x <- expand.grid(1:length(sp.names),1:length(sp.names))
+  full_e[x[,"Var1"]>x[,"Var2"],"Weight"] <- NA
+  return(as.data.frame(full_e,stringsAsFactors=F))
+}
+
+```
+
+```{r cars}
+# Example count matrix
+setwd("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results")
+tax16s <- read.csv("tax16s_prokaryotes.csv", row.names = "Feature.ID")
+tax18s <- read.csv("tax18s_Eukaryotes.csv", row.names = "Feature.ID")
+tax16s_copio <- read.csv("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/16S_copiotrophy/Tax16s_Copiotrophy_and_growth_temp99.csv",row.names = 1)
+# Example metadata
+metadata <- read.csv("/Users/houlin/Desktop/Ecohab/Ecohab22/data/Ecohab22_metadata_samples.csv")
+eu_tax<-read.csv("tax18s_taxonomy.csv", row.names = "Feature.ID")
+pro_tax<-read.csv("tax16s_taxonomy.csv", row.names = "Feature.ID")
+tax18s_genus <- read.csv("tax18s_genus.csv", row.names = "L8")
+tax16s_genus <- read.csv("tax16s_pro_genus.csv", row.names = "L6")
+tax16s_order <- read.csv("tax16s_pro_order.csv", row.names = "L4")
+```
+
+
+
+```{r}
+tax18s_genus.m<-tax18s_genus%>%
+  as.matrix() %>% # transmogrify data.frame into matrix
+  t() 
+tax18s_genus.m.clean <- tax18s_genus.m[, apply(tax18s_genus.m, 2, var) > 0]
+
+tax16s_genus.m<-tax16s_genus%>%
+  as.matrix() %>% # transmogrify data.frame into matrix
+  t() 
+tax16s_genus.m.clean <- tax16s_genus.m[, apply(tax16s_genus.m, 2, var) > 0]
+
+tax16s_order.m<-tax16s_order%>%
+  as.matrix() %>% # transmogrify data.frame into matrix
+  t() 
+tax16s_order.m.clean <- tax16s_order.m[, apply(tax16s_order.m, 2, var) > 0]
+```
+
+```{r}
+eu_genus<-colnames(tax18s_genus.m.clean)
+pro_genus<-colnames(tax16s_genus.m.clean)
+pro_oder<-colnames(tax16s_order.m.clean)
+```
+
+
+
+
+```{r cars}
+pro_data<-tax16s[0:63]%>%
+  as.matrix() %>% # transmogrify data.frame into matrix
+  t() 
+pro_data_clean <- pro_data[, apply(pro_data, 2, var) > 0]
+pro_OTU<-colnames(pro_data_clean)
+eu_data<-tax18s[0:63]%>%
+  as.matrix() %>% # transmogrify data.frame into matrix
+  t()
+eu_data_clean <- eu_data[, apply(eu_data, 2, var) > 0]
+eu_OTU<-colnames(eu_data_clean)
+```
+
+```{r}
+eu.mb<-readRDS("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/SpiecEasi_analysis/eu_se_mb_results.rds")
+```
+
+load in the SpiecEasi results
+```{r}
+setwd("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/SpiecEasi_analysis")
+pro.mb<-readRDS("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/SpiecEasi_analysis/pro_se_mb_results.rds")
+tax16s_genus.mb<-readRDS("tax16s_genus_mb_results.rds")
+tax16s_order.mb<-readRDS("tax16s_order_mb_results.rds")
+tax18s_genus.mb<-readRDS("tax18s_genus_mb_results.rds")
+pro_eu_order.mb<-readRDS("pro_eu_order_mb_results.rds")
+pro_eu_genus.mb<-readRDS("pro_eu_genus_mb_results.rds")
+```
+
+```{r}
+setwd("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/SpiecEasi_analysis")
+tax16s_genus.gl<-readRDS("tax16s_genus_gl_results.rds")
+tax16s_order.gl<-readRDS("tax16s_order_gl_results.rds")
+tax18s_genus.gl<-readRDS("tax18s_genus_gl_results.rds")
+pro_eu_order.gl<-readRDS("pro_eu_order_gl_results.rds")
+pro_eu_genus.gl<-readRDS("pro_eu_genus_gl_results.rds")
+```
+
+
+```{r}
+setwd("/Users/houlin/Desktop/Ecohab/Ecohab22/Amplicons/sequence_results/SpiecEasi_analysis")
+pro_eu_genus.gl2<-readRDS("pro_eu_genus_gl_results2.rds")
+pro_eu_genus.gl3<-readRDS("pro_eu_genus_gl_results3.rds")
+```
+
+```{r}
+find_tax <- function(tax_name,taxonomy_df,tax_final,tax_org) {
+  if (tax_org=='Index'){
+    order_name <- taxonomy_df[tax_name,tax_final]
+  }else{
+    order_name <- taxonomy_df[tax_final][taxonomy_df[tax_org] == tax_name]
+  }
+  
+  if (length(order_name) == 0) {
+    return(NA)  # Return NA if species is not found
+  }
+  return(order_name[1])
+}
+
+## examples: find_tax("Chaetoceros",eu_tax,'Subclass','Genus') results:"Mediophyceae"
+```
+
+```{r}
+unique(eu_tax[eu_tax$Class=='Stramenopiles_X' ,'Subclass'])
+unique(eu_tax$Class)
+```
+
+
+Create Dictionar for tax levels different colors
+###### Eukaryotes Dataframe #############################################
+```{r}
+subclass_colors <- c(
+  "Dinophyceae" = "red",
+  "Prymnesiophyceae" = "blue",
+  "Bacillariophyceae" = "green",
+  "Mediophyceae"="green",
+  "Coscinodiscophyceae"="green",
+  "Mamiellophyceae" = "purple",
+  "Spirotrichea"='orange',"CONThreeP"='orange',"CONTH_8"='orange',"Ciliophora"='orange',"Heterotrichea"='orange',"Oligohymenophorea"='orange'
+  # Add more orders and their respective colors as needed
+)
+
+class_colors<-c("Dinoflagellata"= "red",
+  "Haptophyta_X" = "blue",
+  "Gyrista" = "green",
+  "Chlorophyta_X"  = "purple",
+  "Ciliophora"='orange',
+  "Metazoa"='black',
+  'Cryptophyta_X' ='yellow'
+)
+```
+database: eu_tax, pro_tax
+```{r}
+#### initializing data########################################################
+data<-tax18s_genus.gl
+org_data<- tax18s_genus.m.clean
+genus_list<-eu_genus
+
+subclass_list <- sapply(genus_list, find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Subclass", 
+                       tax_org = "Genus")
+class_list <- sapply(genus_list, find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+################ Create igraph objects ############################
+secor<-cov2cor(as.matrix(getOptCov(data)))
+weighted_adj <- secor * getRefit(data)
+ig.mb <- adj2igraph(weighted_adj)
+
+V(ig.mb)$name<-genus_list
+V(ig.mb)$subclass <- subclass_list
+V(ig.mb)$class <- class_list
+####### Filtering the edges and weights ##############################################
+weight_threshold<-0.1
+#delete the weights below the set threshold 
+ig.mb.filtered <- delete_edges(ig.mb, E(ig.mb)[abs(E(ig.mb)$weight) < weight_threshold])
+# delete the edges with no weights 
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered) ==0])
+
+## set size of vertex and the am.cood
+vsize    <- rowMeans(clr(org_data, 1))+6
+am.coord <- layout.fruchterman.reingold(ig.mb.filtered)
+#par(mfrow=c(1,3))
+
+###### set colors for the vertex based on taxonomy ##########################################
+vertex_colors <- class_colors[V(ig.mb)$class]  
+vertex_colors[is.na(vertex_colors)] <- "grey"
+
+par(mar = c(5, 5, 5, 2) + 0.1, cex = 0.8) 
+plot(ig.mb.filtered, layout=am.coord, 
+     edge.width=1,
+     vertex.size=vsize, 
+     vertex.label=NA, 
+     vertex.color = vertex_colors, 
+     main="Eukayrotes Genus")
+
+legend("topright", legend = names(class_colors), col = class_colors,
+       pch = 10, pt.bg = order_colors, cex = 1)
+```
+
+```{r}
+diatom1=unique(eu_tax[eu_tax$Subclass=='Bacillariophyceae','Genus'])
+diatom2=unique(eu_tax[eu_tax$Subclass=='Mediophyceae','Genus'])
+diatom_genus=c(diatom1,diatom2)
+diatom_genus <- Filter(function(x) x != "", diatom_genus)
+diatom_genus
+```
+```{r}
+se_out<-tax18s_genus.gl
+sp.names<-eu_genus
+tab.se<-convertSEToTable(se_out,sp.name=eu_genus,type.name='glasso')
+diatom_corr <- tab.se %>%
+  filter(Var1 %in% diatom_genus & Var2 %in% diatom_genus)
+plot.se <- ggplot(diatom_corr,aes(x = Var1, y = Var2, fill = Weight)) + geom_tile() + scale_fill_gradient2() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+plot(plot.se)
+
+diatom_corr_others <- tab.se %>%
+  filter(Var1 %in% diatom_genus)
+plot.se <- ggplot(diatom_corr_others,aes(x = Var1, y = Var2, fill = Weight)) + geom_tile() + scale_fill_gradient2() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+plot(plot.se)
+```
+
+
+```{r}
+library(Matrix)
+se_out<-tax18s_genus.gl
+sp.names<-eu_genus
+secor  <- cov2cor(getOptCov(se_out))
+elist<- summary(as.matrix(triu(secor*getRefit(se_out), k=1)))
+#hist(elist[,3],col='red')
+mat<-secor*getRefit(se_out)
+# mat[lower.tri(mat)] <- 0
+mat<-as.matrix(mat)
+rownames(mat) <- sp.names  # Setting row names as Row 1, Row 2, etc.
+colnames(mat) <- sp.names
+diatom_corr <- mat[, colnames(mat) %in% diatom_genus]
+heatmap(diatom_corr, 
+        main = "Heatmap of Sparse Matrix", 
+        # xlab = "Columns", 
+        # ylab = "Rows",
+        col = heat.colors(256),  # Color palette
+        scale = "none")  # No scaling
+
+```
+
+```{r}
+unique(eu_tax$Class)
+unique(eu_tax[eu_tax$Class=="Haptophyta_X",'Subclass'])
+unique(eu_tax[eu_tax$Subclass=="Prymnesiophyceae",'Genus'])
+
+```
+
+#### Cross Domain interactions ###################################################################
+```{r}
+combination_colors_subclass <- c(
+  "Bacillariophyceae" = "green3",
+  "Mediophyceae"="green3",
+  "Coscinodiscophyceae"='green3',
+  "Dinophyceae" = "goldenrod2",
+  "Syndiniales"= "goldenrod1",
+  "Prymnesiophyceae" = "slateblue2",
+  "Mamiellophyceae" = "dodgerblue2",
+  "Cryptophyceae"="dodgerblue4",
+  "Pelagophyceae"="dodgerblue3",
+  "Copiotrophs"= "red",
+  "Slow Copiotrophs"='tomato1',
+  "Oligotrophs" = "pink1"
+  # Add more orders and their respective colors as needed
+)
+
+
+combination_colors_class <- c(
+  "Gyrista" = "green3",
+  "Dinoflagellata" = "goldenrod2",
+  "Haptophyta_X" = "slateblue2",
+  "Chlorophyta_X" = "dodgerblue2",
+  "Cryptophyta_X"="dodgerblue4",
+  "Copiotrophs"= "red",
+  "Slow Copiotrophs"='tomato1',
+  "Oligotrophs" = "mistyrose"
+  # Add more orders and their respective colors as needed
+)
+
+subclass_keep<-c("Dinophyceae","Prymnesiophyceae","Bacillariophyceae","Mediophyceae","Mamiellophyceae","Cryptophyceae","Coscinodiscophyceae","Pelagophyceae","Syndiniales")
+class_keep<-c('Gyrista',"Dinoflagellata","Haptophyta_X","Chlorophyta_X","Cryptophyta_X")
+
+eu_tax_filtered_subclass<-eu_tax%>%
+  filter(Subclass %in% subclass_keep)
+
+eu_tax_filtered_class<-eu_tax%>%
+  filter(Class %in% class_keep) 
+
+eu_subclass_list <- sapply(colnames(tax18s_genus.m.clean), find_tax, 
+                       taxonomy_df = eu_tax_filtered_subclass, 
+                       tax_final = "Subclass", 
+                       tax_org = "Genus")
+eu_class_list <- sapply(colnames(tax18s_genus.m.clean), find_tax, 
+                       taxonomy_df = eu_tax_filtered_class, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+
+oligo_list <- sapply(colnames(tax16s_genus.m.clean), find_tax, 
+                       taxonomy_df = tax16s_copio, 
+                       tax_final = "Category", 
+                       tax_org = "L6")
+
+oligo_list_order <- sapply(colnames(tax16s_order.m.clean), find_tax, 
+                       taxonomy_df = tax16s_copio, 
+                       tax_final = "Category", 
+                       tax_org = "L4")
+```
+
+
+```{r for Pro_EU_genus cross domain}
+#tax18s_genus.m.clean, tax16s_genus.m.clean
+data<-pro_eu_genus.mb
+dtype <- c(rep(1,ncol(tax18s_genus.m.clean)), rep(2,ncol(tax16s_genus.m.clean)))
+taxlist<-c(colnames(tax18s_genus.m.clean),colnames(tax16s_genus.m.clean))
+# taxlist<-c(colnames(tax18s_genus.m.clean),colnames(tax16s_order.m.clean))
+color_code<-c(eu_subclass_list,oligo_list)
+#### get the actual weights ##########################################
+secor<-cov2cor(as.matrix(getOptCov(data)))
+weighted_adj <- secor * getRefit(data)
+ig.mb <- adj2igraph(weighted_adj)
+
+#### Check the weight distribution ##########################################
+
+weighted_adj[lower.tri(weighted_adj)] <- 0
+colnames(weighted_adj)<-taxlist
+rownames(weighted_adj)<-taxlist
+elist.gl  <- summary(weighted_adj)
+hist(elist.gl[,3], col='red')
+
+#### Add more properties to the ig.graph object ##########################################
+V(ig.mb)$name<-taxlist
+V(ig.mb)$colors<-color_code
+########## creating ig element for graphing##########################
+
+weight_threshold<-0.05
+#delete the weights below the set threshold 
+ig.mb.filtered <- delete_edges(ig.mb, E(ig.mb)[E(ig.mb)$weight< weight_threshold])
+# delete the edges with no weights 
+#ig.mb.filtered<-delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[is.na(V(ig.mb.filtered)$colors)])
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered) ==0])
+
+########## Remove 16s vertices with only connections to other 16s ###########################################
+# Identify vertices to remove "Copiotrophs" "Slow Copiotrophs" "Oligotrophs"
+vertices_to_remove <- c()
+copio_neighbor<-c()
+oligo_neighbor<-c()
+slow_copio_neighbor<-c()
+
+for (v in V(ig.mb.filtered)$name) {
+  matching_vertex <- V(ig.mb.filtered)[V(ig.mb.filtered)$name == v]
+  neighbors_v <- neighbors(ig.mb.filtered, v)
+  if (v %in% pro_genus & all(neighbors_v$name %in% pro_genus)) {
+    vertices_to_remove <- c(vertices_to_remove, v)  # Add vertex to removal list
+  }
+  if (v %in% eu_genus & all(neighbors_v$name %in% eu_genus)) {
+    vertices_to_remove <- c(vertices_to_remove, v)  # Add vertex to removal list
+  }
+  if (!is.na(matching_vertex$colors)){
+    for (neighbor in neighbors_v$name) {
+        if (neighbor %in% eu_genus) {
+            if (matching_vertex$colors == "Copiotrophs"){
+              copio_neighbor <- c(copio_neighbor, neighbor)
+            }
+          if (matching_vertex$colors == "Slow Copiotrophs"){
+            slow_copio_neighbor <- c(slow_copio_neighbor, neighbor)
+          }
+           if (matching_vertex$colors == "Oligotrophs"){
+             oligo_neighbor <- c(oligo_neighbor, neighbor)
+           }
+        }
+    }
+  }
+}
+
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, vertices_to_remove)
+
+
+copio_neighbor <- as.data.frame(table(copio_neighbor))
+colnames(copio_neighbor)<-c('tax','count')
+scopio_neighbor <- as.data.frame(table(slow_copio_neighbor))
+colnames(scopio_neighbor)<-c('tax','count')
+oligo_neighbor <- as.data.frame(table(oligo_neighbor))
+colnames(oligo_neighbor)<-c('tax','count')
+```
+```{r}
+unique(eu_tax[eu_tax$Subclass=='Bacillariophyceae','Genus'])
+"Pseudo-nitzschia"
+neighbors_v <- neighbors(ig.mb, "Pseudo-nitzschia")
+```
+
+
+```{r for Pro_EU_genus cross domain}
+copio_neighbor['Subclass']<-sapply(as.character(copio_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Subclass", 
+                       tax_org = "Genus")
+copio_neighbor['Class']<-sapply(as.character(copio_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+
+scopio_neighbor['Subclass']<-sapply(as.character(scopio_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Subclass", 
+                       tax_org = "Genus")
+scopio_neighbor['Class']<-sapply(as.character(scopio_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+
+oligo_neighbor['Subclass']<-sapply(as.character(oligo_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Subclass", 
+                       tax_org = "Genus")
+oligo_neighbor['Class']<-sapply(as.character(oligo_neighbor$tax), find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+```
+
+```{r Visualizing the graph}
+ig.mb.filtered<-delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[is.na(V(ig.mb.filtered)$colors)])
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered) ==0])
+########## Add colors ###########################################
+order_colors <- c("blue", "red")  # Colors for Eukaryotes and Prokaryotes
+names(order_colors) <- c(1, 2)
+color_choice<-combination_colors_subclass
+vertex_colors <- color_choice[V(ig.mb.filtered)$colors]  
+vertex_colors[is.na(vertex_colors)] <- "white"
+
+########## Visualizing ig element for graphing##########################
+par(mar = c(5, 5, 5, 2) + 0.1, cex = 0.8) 
+set.seed(15)
+plot(ig.mb.filtered,
+     vertex.size=9,
+     vertex.label=NA,
+     vertex.color=vertex_colors, #order_colors[dtype],
+     main='Cross Domain 16s, 18s Genus') #, vertex.color=dtype+1,
+
+legend(x = 1.2, y = 1.1, legend = names(color_choice), 
+       col=color_choice,
+       pch = 10, pt.bg = color_choice, cex = 1)
+```
+
+```{r}
+#unique(eu_tax[eu_tax$Class=='Stramenopiles_X' ,'Subclass'])
+unique(pro_tax$Class)
+```
+
+
+#### Prokaryotes Genus, the entire ASV spaces ###################################################################
+```{r}
+pro_class_colors<-c(" c__Alphaproteobacteria"= "red",
+  " c__Gammaproteobacteria" = "blue",
+  " c__Bacteroidia" = "green",
+  " c__Bdellovibrionia"  = "purple",
+  " c__Nitrospiria"='orange',
+  " c__Thermoplasmata"='black',
+  " c__Cyanobacteriia" ='yellow'
+)
+
+Oligo_colors<-c("Copiotrophs"= "red",
+  "Slow Copiotrophs"='tomato2',
+  "Oligotrophs" = "pink1"
+)
+```
+
+
+```{r}
+#### initializing data########################################################
+data<-tax16s_genus.mb
+org_data<- tax16s_genus.m.clean
+genus_list<-pro_genus
+
+# subclass_list <- sapply(genus_list, find_tax, 
+#                        taxonomy_df = pro_tax, 
+#                        tax_final = "Subclass", 
+#                        tax_org = "Genus")
+class_list <- sapply(genus_list, find_tax, 
+                       taxonomy_df = pro_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Genus")
+
+oligo_list <- sapply(genus_list, find_tax, 
+                       taxonomy_df = tax16s_copio, 
+                       tax_final = "Category", 
+                       tax_org = "L6")
+################ Create igraph objects ############################
+secor<-cov2cor(as.matrix(getOptCov(data)))
+weighted_adj <- secor * getRefit(data)
+ig.mb <- adj2igraph(weighted_adj)
+
+V(ig.mb)$name<-genus_list
+V(ig.mb)$class <- class_list
+V(ig.mb)$oligo <- oligo_list
+####### Filtering the edges and weights ##############################################
+weight_threshold<-0.03
+#delete the weights below the set threshold 
+ig.mb.filtered <- delete_edges(ig.mb, E(ig.mb)[abs(E(ig.mb)$weight) < weight_threshold])
+# delete the edges with no weights 
+ig.mb.filtered<-delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[is.na(V(ig.mb.filtered)$oligo)])
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered) ==0])
+
+## set size of vertex and the am.cood
+vsize    <- rowMeans(clr(org_data, 1))+6
+am.coord <- layout.fruchterman.reingold(ig.mb.filtered)
+#par(mfrow=c(1,3))
+
+###### set colors for the vertex based on taxonomy ##########################################
+vertex_colors <- pro_class_colors[V(ig.mb.filtered)$class]  
+vertex_colors[is.na(vertex_colors)] <- "grey"
+
+vertex_colors_oligo <- Oligo_colors[V(ig.mb.filtered)$oligo]  
+vertex_colors_oligo[is.na(vertex_colors_oligo)] <- "grey"
+
+########## Visualizing the plots ###################################
+par(mar = c(5, 5, 4, 2) + 0.1, cex = 0.8) 
+plot(ig.mb.filtered, layout=am.coord, 
+     edge.width=1,
+     vertex.size=vsize, 
+     vertex.label=NA, 
+     vertex.color = vertex_colors_oligo, 
+     main="Prokaryotes Genus")
+
+legend(x = 1, y = 1, legend = names(Oligo_colors), col = Oligo_colors,
+       pch = 10, pt.bg = order_colors, cex = 1)
+```
+
+
+#### Prokaryotes OTU, the entire ASV spaces ###################################################################
+```{r}
+########### initializing data########################################################
+se_out<-pro.mb
+org_data<- pro_data_clean
+########### Approximating Egde Strength using  the covariance ########################################################
+sebeta <- symBeta(getOptBeta(se_out), mode='maxabs')
+elist.mb     <- summary(sebeta)
+hist(elist.mb[,3], col='forestgreen')
+########### Create igraph objects ########################################################
+
+weighted_adj <- abs(sebeta) * getRefit(se_out)
+ig.mb <- adj2igraph(weighted_adj)
+
+oligo_list <- sapply(pro_OTU, find_tax, 
+                       taxonomy_df = tax16s_copio, 
+                       tax_final = "Category", 
+                       tax_org = "Index")
+###### adding categories to the ig.mb ##############################################
+V(ig.mb)$name<-pro_OTU
+V(ig.mb)$oligo <- oligo_list
+####### Filtering the edges and weights ##############################################
+weight_threshold<-0.001
+
+#delete the weights below the set threshold 
+ig.mb.filtered <- delete_edges(ig.mb, E(ig.mb)[E(ig.mb)$weight< weight_threshold])
+# delete the edges with no weights 
+ig.mb.filtered<-delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[is.na(V(ig.mb.filtered)$oligo)]) # for copiotrophs
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered)<1])
+
+## set size of vertex and the am.cood
+vsize    <- rowMeans(clr(org_data, 1))+6
+am.coord <- layout.fruchterman.reingold(ig.mb.filtered)
+
+
+vertex_colors_oligo <- Oligo_colors[V(ig.mb.filtered)$oligo]  
+vertex_colors_oligo[is.na(vertex_colors_oligo)] <- "grey"
+
+par(mar = c(5, 5, 4, 2) + 0.1, cex = 0.8) 
+
+plot(ig.mb.filtered, layout=am.coord,
+     vertex.size=vsize, edge.width=1,vertex.label=NA,
+     vertex.color = vertex_colors_oligo, 
+     main="Prokaryotes OUTs")
+
+legend(x = 1, y = 1, legend = names(Oligo_colors), col = Oligo_colors,
+       pch = 10, pt.bg = order_colors, cex = 1)
+```
+#### Eukaryotes OTU, the entire ASV spaces ###################################################################
+
+```{r}
+subclass_colors <- c(
+  "Dinophyceae" = "red",
+  "Prymnesiophyceae" = "blue",
+  "Bacillariophyceae" = "green",
+  "Mediophyceae"="green",
+  "Coscinodiscophyceae"="green",
+  "Mamiellophyceae" = "purple",
+  "Spirotrichea"='orange',"CONThreeP"='orange',"CONTH_8"='orange',"Ciliophora"='orange',"Heterotrichea"='orange',"Oligohymenophorea"='orange'
+  # Add more orders and their respective colors as needed
+)
+
+class_colors<-c("Dinoflagellata"= "red",
+  "Haptophyta_X" = "blue",
+  "Gyrista" = "green",
+  "Chlorophyta_X"  = "purple",
+  "Ciliophora"='orange',
+  "Metazoa"='black',
+  'Cryptophyta_X' ='yellow'
+)
+```
+
+```{r}
+########### initializing data########################################################
+se_out<-eu.mb
+org_data<- eu_data_clean
+########### Approximating Egde Strength using  the covariance ########################################################
+sebeta <- symBeta(getOptBeta(se_out), mode='maxabs')
+elist.mb     <- summary(sebeta)
+hist(elist.mb[,3], col='forestgreen')
+########### Create igraph objects ########################################################
+
+weighted_adj <- abs(sebeta) * getRefit(se_out)
+ig.mb <- adj2igraph(weighted_adj)
+
+class_list <- sapply(eu_OTU, find_tax, 
+                       taxonomy_df = eu_tax, 
+                       tax_final = "Class", 
+                       tax_org = "Index")
+###### adding categories to the ig.mb ##############################################
+V(ig.mb)$name<-eu_OTU
+V(ig.mb)$class <-class_list
+####### Filtering the edges and weights ##############################################
+weight_threshold<-0
+
+#delete the weights below the set threshold 
+ig.mb.filtered <- delete_edges(ig.mb, E(ig.mb)[E(ig.mb)$weight< weight_threshold])
+# delete the edges with no weights 
+ig.mb.filtered<-delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[is.na(V(ig.mb.filtered)$class)]) # for copiotrophs
+ig.mb.filtered<- delete_vertices(ig.mb.filtered, V(ig.mb.filtered)[degree(ig.mb.filtered)==0])
+
+## set size of vertex and the am.cood
+vsize    <- rowMeans(clr(org_data, 1))+6
+am.coord <- layout.fruchterman.reingold(ig.mb.filtered)
+
+color_choice<-class_colors
+vertex_colors<- color_choice[V(ig.mb.filtered)$class]  
+vertex_colors[is.na(vertex_colors)] <- "grey"
+```
+
+
+```{r}
+####### Visualizing ##############################################
+par(mar = c(5, 5,5, 1) + 0.1, cex = 0.8) 
+set.seed(15)
+plot(ig.mb.filtered, layout=am.coord,
+     vertex.size=vsize, edge.width=1,vertex.label=NA,
+     vertex.color = vertex_colors, 
+     main="Prokaryotes OUTs")
+
+legend(x = 1, y = 1, legend = names(color_choice), col = color_choice,
+       pch = 10, pt.bg =color_choice, cex = 1)
+```
+
+
+
+
+```{r} 
+#evaluate the weights on edges networks using the terms from the underlying model
+#the strength of associations 
+#Positive edge weight: Potential positive association or co-occurrence.
+#Negative edge weight: Potential negative association, suggesting competition or exclusion between the taxa.
+df<-tax18s_genus.mb
+sebeta <- symBeta(getOptBeta(df), mode='maxabs')
+elist.mb<- summary(sebeta)
+hist(elist.mb[,3],main='Prokaryotes MB network', xlab='edge weights',col='forestgreen')
+```
+
+
+```{r} 
+#The degree of a node (taxon) reflects the number of direct associations that taxon has with others in the microbial community
+dd.mb <- degree.distribution(ig.mb)
+plot(0:(length(dd.mb)-1), dd.mb, ylim=c(0,.04), type='b',
+      ylab="Frequency", xlab="Degree", main="Degree Distributions")
+```
+
+
+
+
+```{r pressure, echo=FALSE}
+library(huge)
+x<-pro_data
+x_clean <- x[, apply(x, 2, var) > 0]
+fit <- huge.mb(x_clean, nlambda = 30, lambda.min.ratio = 0.01)
+sparsity <- sapply(fit$beta, function(b) mean(b != 0))  # Calculate sparsity for each lambda
+plot(fit$lambda, sparsity, type = 'b', xlab = 'Lambda', ylab = 'Sparsity')
+```
+
+```{r}
+convertSEToTable <- function(se_out,sp.names){
+  #This is just a fancy helper function to get the data in a comparable format to the output of lesson 1 so we can make a similar plot. We will cover other methods for visualizing this type of output in future lessons.
+  secor <- cov2cor(as.matrix(getOptCov(se_out))) # See spieceasi documentation for how to pull out weights for comparison
+  elist     <- summary(triu(secor*getRefit(se_out), k=1))
+  elist[,1] <- sp.names[elist[,1]]
+  elist[,2] <- sp.names[elist[,2]]
+  elist[,4] <- paste(elist[,1],elist[,2])
+  full_e <- expand.grid(sp.names,sp.names)
+  rownames(full_e) <- paste(full_e[,1],full_e[,2])
+  full_e[,"Weight"] <- 0
+  full_e[elist[,4],"Weight"] <- elist[,3]
+  x <- expand.grid(1:length(sp.names),1:length(sp.names))
+  full_e[x[,"Var1"]>x[,"Var2"],"Weight"] <- NA
+  return(as.data.frame(full_e,stringsAsFactors=F))
+}
+```
+
+
+```{r}
+pro_se.mb <- spiec.easi(pro_data, method='mb', lambda.min.ratio=1e-2,
+                          nlambda=20, pulsar.params=list(rep.num=20, ncores = 10))
+
+saveRDS(pro_se.mb, file = "pro_se_mb_results.rds")
+pro_tab<- convertSEToTable(se,sp.names=colnames(pro_data))
+```
+
+
+```{r}
+eu_se.mb <- spiec.easi(eu_data, method='mb', lambda.min.ratio=1e-2,
+                          nlambda=20, pulsar.params=list(rep.num=20, ncores = 10))
+saveRDS(eu_se.mb, file = "pro_se_mb_results.rds")
+eu_tab<- convertSEToTable(se,sp.names=colnames(pro_data)) 
+```
+

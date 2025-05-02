@@ -1,0 +1,244 @@
+---
+title: "Differential_gene_expression"
+output: html_document
+date: "2024-09-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(DESeq2)
+library(tidyverse)
+library(Matrix)
+library(igraph)
+library(magrittr) 
+library(dplyr)
+library(otuSummary)
+library(reshape2) # has the melt function, which I use to wrangle data
+library("BiocParallel")
+pass <- function(x){x}
+```
+
+## R Markdown
+DESeq 
+normalization method: Size Factor Calculation (Median-of-Ratios Method)
+For each gene, DESeq2 calculates the geometric mean of its counts across all samples.
+For each sample, the count for each gene is divided by this gene’s geometric mean to get a ratio.
+DESeq2 then computes the median of these ratios for each sample, which serves as the size factor for that sample.
+This size factor scales the counts for each sample, allowing for effective normalization of sequencing depth and library size differences.
+
+```{r Import all datasets}
+setwd("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms")
+genecounts<- read.csv("genecounts/Ecohab22_genecounts_annotation.csv",row.names=1)
+#cpl.data <- read.csv("CPL/EcoHAB22-CPL-norm-clustered-filtered-taxfull.csv",row.names="geneID")
+#auto.cpl<- read.csv("df_autotrophs_cpl.csv",row.names="geneID")
+metadata <- read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/data/Ecohab22_metadata_042125.csv",row.names = 'sample.id')
+rows_to_drop <- c("EH16_0070", "EH15_0064")
+# Drop rows with specified row names
+metadata$Phase_group <- as.factor(metadata$Phase_group)
+cluster_annotate<-read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/CPL/cluster_annotation_df.csv",row.names="cluster")
+```
+
+```{r}
+tpm<- read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/Ecohab22_TPM_annotated-taxfull.csv",row.names=1)
+annotation<-tpm[97:119]
+```
+
+```{r}
+silA_gene<-read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/SiLA_gene.csv",row.names=1)
+annotation<- merge(annotation, silA_gene, by = "row.names", all.x = TRUE)
+rownames(annotation) <- annotation$Row.names
+annotation$Row.names <- NULL
+```
+
+
+
+```{r pressure, echo=FALSE}
+#data<-genecounts[4:66]
+diatom_counts <- genecounts[grepl("Bacillariophyta", genecounts$LPI_taxonomy), 4:66]
+data<-diatom_counts
+row_names <- rownames(data)
+metadata <- metadata[(rownames(metadata) %in% colnames(data)), ]
+data<-data[,rownames(metadata)]
+#rownames(data) <- row_names
+metadata$Diatom_clusters <- factor(
+  metadata$Diatom_clusters,
+  levels = c(0, 1, 2),
+  labels = c("nonbloom", "bloom-1", "bloom-2")
+)
+dds <- DESeqDataSetFromMatrix(countData = data,
+                              colData = metadata,
+                              design = ~ Diatom_clusters)
+# filter by keeping genes with sum above 10 counts
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds<- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+output_dir <- "/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/DESeq2_results/"
+write.csv(as.data.frame(normalized_counts), file = paste0(output_dir,"diatom_normalized_counts.csv"))  
+
+register(MulticoreParam(12))
+start_time <- Sys.time()
+dds.results <- DESeq(dds)
+saveRDS(dds.results, file =paste0(output_dir,"EH22_dds_diatom_clusters.rds"))
+print(Sys.time() - start_time)
+```
+```{r}
+dds.results<- readRDS("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/DESeq2_results/EH22_dds_diatom_clusters.rds")
+```
+
+```{r}
+treatment_levels <- levels(dds.results$Diatom_clusters)
+output_dir <- "/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/DESeq2_results/"
+# Loop through each pair of treatments 
+results_list <- list()
+LFC_results_list<-list()
+for (i in 1:(length(treatment_levels) - 1)){
+  for (j in (i + 1):length(treatment_levels)) {
+    contrast <- c("Diatom_clusters", treatment_levels[i], treatment_levels[j])
+    res <- results(dds.results, contrast = contrast)
+    # shrinkage to remove extreme values
+    resLFC <- lfcShrink(dds.results,contrast = contrast, type="normal")
+    comparison_name <- paste(treatment_levels[i], "_vs_", treatment_levels[j], sep = "")
+    par(mfrow=c(1,2), mar=c(4,4,2,1))
+    plotMA(res, main="raw")
+    plotMA(resLFC, main="apelgm")
+    print(comparison_name)
+    mtext(comparison_name, side=3, line=1, outer=TRUE, cex=1.5)
+    results_list[[comparison_name]] <- res
+    LFC_results_list[[comparison_name]]<-resLFC
+    
+    resSig_filter<- resSig_filter[order(-resSig_filter$log2FoldChange), ]
+    write.csv(resSig_filter, file = paste0(output_dir,"Diatom_DESeq2_genecounts_", comparison_name, ".csv"))
+    
+    resSig_filter<- resSig_filter[order(-resSig_filter$log2FoldChange), ]
+    write.csv(resSig_filter, file = paste0(output_dir,"Diatom_DESeq2_genecounts_", comparison_name, "_LFC.csv"))
+  }
+}
+```
+```{r}
+treatment_levels <- levels(dds.results$Diatom_clusters)
+comparison_name <- paste(treatment_levels[2], "_vs_", treatment_levels[3], sep = "")
+print(comparison_name)
+contrast <- c("Diatom_clusters", treatment_levels[2], treatment_levels[3])# 1,2,3 , nonbloom, bloom-1,bloom-2
+res <- results(dds.results, contrast = contrast)
+resLFC <- lfcShrink(dds.results,contrast = contrast, type="normal")
+par(mfrow=c(1,2), mar=c(4,4,2,1))
+plotMA(res, main="Bloom-1 vs Bloom-2 raw")
+plotMA(resLFC, main="Bloom-1 vs Bloom-2 LFC")
+```
+
+
+```{r}
+resLFC_annot <- as.data.frame(res)# significant only if padj<0.05 and not  na
+resLFC_annot$geneid <- rownames(resLFC_annot)
+annotation$geneid<-rownames(annotation)# Merge with your annotation file
+resLFC_annot <- inner_join(resLFC_annot, annotation, by = "geneid")
+rownames(resLFC_annot)<-resLFC_annot$geneid
+```
+
+```{r, fig.width=5, fig.height=5}
+#resLFC_annot$flag <- (resLFC_annot$padj < 0.1) & resLFC_annot$ISIP_gene != "" 
+#unique(resLFC_annot[grepl("silicon", resLFC_annot$MCL_anno, ignore.case = TRUE),]$MCL_anno)
+resLFC_annot$flag <- (resLFC_annot$padj < 0.1) & grepl("flavodoxin", resLFC_annot$MCL_anno, ignore.case = TRUE)
+png("your_plot_name.png", width = 1800, height = 1600, res = 300)  # dimensions in pixels, res = resolution (dpi)
+plotMA(res, main = "Bloom-1 vs Bloom-2 Flavodoxin",
+       cex.lab = 1,    # Larger axis label size
+       cex.axis = 0.8,   # Larger tick mark size
+       cex.main = 1,
+       mgp = c(2, 0.6, 0))
+# Circle ISIP genes on top
+with(resLFC_annot[resLFC_annot$flag, ], {
+  points(baseMean, log2FoldChange,
+         pch = 21, 
+         bg = NA, 
+         col = "red",  # red circle
+         cex = 0.8, 
+         lwd = 1.5)
+})
+
+dev.off()
+```
+```{r, fig.width=5, fig.height=5}
+plotMA(res, main = "Diatom Bloom-1 vs Bloom-2 ",
+       cex.lab = 1,    # Larger axis label size
+       cex.axis = 0.8,   # Larger tick mark size
+       cex.main = 1,
+       mgp = c(2, 0.6, 0))
+
+# Add points for ISIP genes
+ptsize=0.6
+with(resLFC_annot[(resLFC_annot$padj < 0.1) & resLFC_annot$ISIP_gene != "", ], {
+  points(baseMean, log2FoldChange, col = "black", pch = 16,cex=ptsize)})
+
+# Add points for N_genes
+with(resLFC_annot[(resLFC_annot$padj < 0.1)& grepl("flavodoxin", resLFC_annot$MCL_anno, ignore.case = TRUE), ], {
+  points(baseMean, log2FoldChange, col = "orange", pch = 17,cex=ptsize)})
+
+with(resLFC_annot[resLFC_annot$padj < 0.1 & grepl("plastocyanin", resLFC_annot$MCL_anno, ignore.case = TRUE), ],
+     {points(baseMean, log2FoldChange, col = "green", pch = 18,cex=ptsize)})
+
+with(resLFC_annot[resLFC_annot$padj < 0.1 &
+      grepl("high-affinity iron transporter", resLFC_annot$MCL_anno, ignore.case = TRUE), ],
+     points(baseMean, log2FoldChange, col = "red", pch = 18,cex=ptsize))
+legend("topleft",   # <- Key part!
+       legend=c("ISIP", "Flavodoxin", "plastocyanin","Iron Transporter"),
+       col=c("black", "orange", "green","red"),
+       pch=c(16,17,18),cex=0.6,
+       title="Gene Types") 
+```
+
+######## change the MCL_anno by making sure it matches ISIP_gene #########
+```{r}
+resLFC_annot$MCL_anno <- ifelse(!is.na(resLFC_annot$ISIP_gene) & resLFC_annot$ISIP_gene != "",
+                                resLFC_annot$ISIP_gene,
+                                resLFC_annot$MCL_anno)
+
+# Then N_genes: overwrite MCL_anno if N_genes is not NA or empty
+resLFC_annot$MCL_anno <- ifelse(!is.na(resLFC_annot$N_genes) & resLFC_annot$N_genes != "",
+                                resLFC_annot$N_genes,resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(!is.na(resLFC_annot$dab_gene) & resLFC_annot$dab_gene != "",
+                                resLFC_annot$dab_gene,resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(!is.na(resLFC_annot$SiLA_gene),resLFC_annot$SiLA_gene,
+                                resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(grepl("flavodoxin", resLFC_annot$MCL_anno, ignore.case = TRUE),
+                                "Flavodoxin",resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(grepl("glutamine synthetase", resLFC_annot$MCL_anno, ignore.case = FALSE),
+                                "GSIIA",resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(grepl("NirB|nitrite reductase \\[NAD\\(P\\)H\\], small subunit", 
+        resLFC_annot$MCL_anno, ignore.case = FALSE),
+  "NADH-Nir",resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(grepl("ferredoxin-nitrite reductase|NirG", resLFC_annot$MCL_anno, ignore.case = FALSE),
+  "Fd-Nir",resLFC_annot$MCL_anno)
+
+resLFC_annot$MCL_anno <- ifelse(grepl("GLUTAMINE SYNTHETASE", resLFC_annot$MCL_anno, ignore.case = FALSE),
+                                "GSIII",resLFC_annot$MCL_anno)
+resLFC_annot$MCL_anno <- ifelse(grepl("glutamate synthase", resLFC_annot$MCL_anno, ignore.case = FALSE),
+                                "GOGAT",resLFC_annot$MCL_anno)
+```
+
+
+```{r}
+FC_mean <- resLFC_annot %>%
+  group_by(MCL_anno) %>%
+  summarise(mean_log2FC = mean(log2FoldChange, na.rm = TRUE))
+
+# Weighted mean
+FC_weighted_mean <-resLFC_annot %>%
+  group_by(MCL_anno) %>%
+  summarise(weighted_log2FC = weighted.mean(log2FoldChange, baseMean, na.rm = TRUE))
+```
+
+
+```{r}
+rownames(resLFC_annot)<-resLFC_annot$geneid
+output_dir <- "/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/DESeq2_results/"
+write.csv(resLFC_annot, file = paste0(output_dir,"Diatom_DESeq2_genecounts_bloom-1_bloom-2_anno.csv"))
+```
+
