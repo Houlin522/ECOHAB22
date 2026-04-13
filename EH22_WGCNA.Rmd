@@ -1,0 +1,435 @@
+---
+title: "WGCNA"a
+author: "Lin Hou"
+date: "2024-06-12"
+output: html_document
+source: https://bioinformaticsworkbook.org/tutorials/wgcna.html#gsc.tab=0
+The WGCNA R package builds “weighted gene correlation networks for analysis” from expression data. It was originally published in 2008 and cited as the following:
+
+Langfelder, P. and Horvath, S., 2008. WGCNA: an R package for weighted correlation network analysis. BMC bioinformatics, 9(1), p.559.
+Zhang, B. and Horvath, S., 2005. A general framework for weighted gene co-expression network analysis. Statistical applications in genetics and molecular biology, 4(1).
+---
+
+```{r setup, include=FALSE}
+library(WGCNA)
+library(ggplot2)
+library(tidyverse)
+library(magrittr) 
+library(dplyr)
+library("igraph")
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+
+```{r import dataset}
+setwd("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms")
+df_org<-read.csv('CPL/CPL_filtered_tax_full_altered_MCL_cluster.csv',row.names="geneID")
+
+auto_list=c('Archaeplastida','Synurophyceae','Cryptophyta','Haptophyta','Filosa-Chlorarachnea','Dinophyceae','Filosa-Chlorarachnea','Bacillariophyta','Bolidophyceae-and-relatives','Chrysophyceae-Synurophyceae','Dictyochophyceae','Pelagophyceae','Phaeophyceae','Pinguiophyceae','Raphidophyceae','Synchromophyceae','Xanthophyceae')
+autopattern <- paste(auto_list, collapse = "|")
+
+metadata<-read.table('/Users/houlin/Desktop/Research/Ecohab/Ecohab22/data/Ecohab22_metadata_samples.tsv', header = TRUE, sep = "\t")
+metadata$Starttime <- as.POSIXct(metadata$Starttime)
+# Extract month and day formatted as "MM-DD"
+metadata$month_day <- format(metadata$Starttime, "%m-%d")
+rownames(metadata) <- metadata$`sample.id`
+metadata$`sample.id` <- NULL
+```
+
+```{r}
+tax<-'Autotrophs'
+
+if (tax == "noMET") {
+    df_use <- df_org[df_org$Kingdom != "Opisthokonta", ]
+  } else if (tax == "Autotrophs") {
+    df_use <- df_org[grepl(autopattern, df_org$LPI_taxonomy), ]
+  } else {
+    df_use <- df_org[grepl(tax, df_org$LPI_taxonomy), ]
+  }
+
+df_cluster<- df_use%>%
+  group_by(MCL_cluster) %>%
+  summarise(across(0:63, sum, na.rm = TRUE)) %>%
+  as.data.frame()
+rownames(df_cluster) <-  df_cluster$MCL_cluster
+
+df_cluster <- df_cluster %>%
+  select(-MCL_cluster)
+df_cluster<-df_cluster[-1,]
+print(paste(tax,'MCL_clustered dataframe created!'))
+```
+```{r}
+big_cluster<-df_use[df_use$MCL_cluster_size>10,'MCL_cluster']
+big_cluster <- unique(big_cluster)
+big_cluster<-big_cluster[-1]
+big_cluster <- union(big_cluster, c("dabA", "dabC", "dabD"))
+```
+
+
+```{r}
+df_relative <- df_cluster / colSums(df_cluster)*100
+mean_expression <- rowMeans(df_relative)
+# Identify genes with mean expression > 0.1% (0.01 and 0.05 for diatom only)
+# 0.1% and 0.5% --> 22433,0.01% and 0.05%--> 106474
+# 0.25% B. C. Kolody et al. and 0.5% ---> 11465 #11168
+thres<-0.005
+condition_mean <- mean_expression > thres
+# Identify genes with any sample expression > 0.5%
+condition_sample <- apply(df_relative, 1, function(x) any(x > 0.1))
+keep_clusters <- rownames(df_relative) %in% c("dabA", "dabC","dabD")
+genes_to_keep <- condition_mean | keep_clusters #| condition_sample
+genes_to_keep[is.na(genes_to_keep)] <- FALSE
+#filtering for the datasets
+# keep only rownames that are in big_cluster as well
+#df_filtered_cluster <- df_cluster[genes_to_keep & rownames(df_cluster) %in% big_cluster, ]
+#df_filtered_relative <- df_relative[genes_to_keep & rownames(df_relative) %in% big_cluster, ]
+
+df_filtered_cluster <- df_cluster[genes_to_keep, ]
+df_filtered_relative <- df_relative[genes_to_keep, ]
+### filtering for counts > 0 for over 50% of the samples
+#keep <- apply(df_filtered_cluster, 1, function(x) sum(x > 0) > (0.25 * ncol(df_filtered_cluster)))
+#df_filtered_cluster<-df_filtered_cluster[keep,]
+#df_filtered_relative <- df_filtered_relative[keep,]
+
+datExpr <- log2(df_filtered_cluster + 1)
+
+datExpr_relative <- log2(df_filtered_relative + 1)
+
+print(dim(datExpr))
+```
+
+
+```{r Creating expression plots}
+df<-datExpr #[turquoise_genes,]
+
+expr_normalized_df <- data.frame(df) %>%
+  mutate(Gene_id = row.names(df)) %>%
+  pivot_longer(-Gene_id) # transform the data from wide into long format
+
+expr_normalized_df %>% ggplot(., aes(x = name, y = value)) +
+  geom_violin() +geom_point() +theme_bw() +
+  theme(axis.text.x = element_text( angle = 90)) +
+  ylim(0, NA) +
+  labs(title = paste0(tax," Normalized  Expression"),
+    x = "Samples",
+    y = "normalized expression")
+```
+
+```{r WCGNA transposed dataset}
+df<-datExpr
+input_mat <- t(df) # transposed dataset
+allowWGCNAThreads(nThreads = 8)        
+powers = c(c(1:10), seq(from = 12, to = 20, by = 2))
+sft = pickSoftThreshold(
+  input_mat,             # <= Input data
+  #blockSize = 30,
+  powerVector = powers,
+  verbose = 1)
+
+par(mfrow = c(1,2));
+cex1 = 0.9;
+plot(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     main = paste(tax,"Scale independence"))
+
+text(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red")
+abline(h = 0.90, col = "red")
+plot(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity",
+     type = "n",
+     main = paste(tax,"Mean connectivity"))
+text(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     labels = powers,
+     cex = cex1, col = "red")
+```
+
+Pick a soft threshold power near the curve of the plot, so here we could pick 7, 8 or 9. We’ll pick 9 but feel free to experiment with other powers to see how it affects your results. Now we can create the network using the blockwiseModules command. The blockwiseModule may take a while to run, since it is constructing the TOM (topological overlap matrix) and several other steps. Parameters: https://www.rdocumentation.org/packages/WGCNA/versions/1.69/topics/blockwiseModules
+
+```{r WCGNA network}
+start_time <- Sys.time()
+picked_power = 10
+temp_cor <- cor       
+cor <- WGCNA::cor         # Force it to use WGCNA cor function (fix a namespace conflict issue)
+netwk <- blockwiseModules(input_mat,                # <= input here
+                          # == Adjacency Function ==
+                          power = picked_power,                # <= power here
+                          networkType = "signed",
+                          corFnc = "cor",                     
+                          corOptions = list(method = "spearman"),
+    
+                          # == Tree and Block Options ==
+                          deepSplit = 2,
+                          pamRespectsDendro = F,
+                          # detectCutHeight = 0.75,
+                          minModuleSize = 50,
+                          maxBlockSize = 10000,
+                          # == Module Adjustments ==
+                          reassignThreshold = 0.25,
+                          mergeCutHeight = 0.25,
+                          # == TOM == Archive the run results in TOM file (saves time)
+                          saveTOMs = T,
+                          saveTOMFileBase = "ER",
+                          # == Output Options
+                          numericLabels = T,
+                          verbose = 3)
+cor <- temp_cor
+end_time <- Sys.time()
+runtime <- end_time - start_time
+print(runtime)
+```
+
+Let’s take a look at the modules, there
+```{r WCGNA plotting}
+# Convert labels to colors for plotting
+
+mergedColors <- labels2colors(netwk$colors)
+ModuleColors <- mergedColors[netwk$blockGenes[[1]]]
+geneTree<-netwk$dendrograms[[1]]
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(
+  geneTree,
+  ModuleColors,
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05,
+  main = paste(tax, "CPL Gene dendrogram >", thres,'%'))
+```
+
+
+Relate Module (cluster) Assignments to Treatment Groups
+
+WGCNA will calcuate an Eigangene (hypothetical central gene) for each module, so it easier to determine if modules are associated with different samples.
+
+```{r Visualizing Module's Association with different samples}
+# Get Module Eigengenes per cluster
+MElist <- moduleEigengenes(input_mat, mergedColors)
+MEs<-MElist$eigengenes 
+MEs0 <- MElist$eigengenes 
+
+# Reorder modules so similar modules are next to each other
+MEs0 <- orderMEs(MEs0)
+module_order = names(MEs0) %>% gsub("ME","", .)
+
+# Add samples names
+#MEs0$samples = row.names(MEs0)
+MEs0$samples= metadata$Phase_group
+# tidy & plot data
+mME = MEs0 %>%
+  pivot_longer(-samples) %>%
+  mutate(
+    name = gsub("ME", "", name),
+    name = factor(name, levels = module_order))
+```
+
+```{r}
+ME.dissimilarity = 1-cor(MElist$eigengenes, use="complete")
+METree = hclust(as.dist(ME.dissimilarity), method = "average") #Clustering eigengenes 
+par(mar = c(0,4,2,0)) #seting margin sizes
+par(cex = 0.6);#scaling the graphic
+plot(METree)
+abline(h=.3, col = "red") #a height of .25 corresponds to correlation of .75
+
+merge <- mergeCloseModules(input_mat, mergedColors, cutHeight = .3)
+New_mergedColors = merge$colors
+New_ModuleColors<-New_mergedColors[netwk$blockGenes[[1]]]
+New_mergedMEs = merge$newMEs
+
+plotDendroAndColors(geneTree, cbind(ModuleColors, New_ModuleColors), 
+c("Original Module", "Merged Module"),
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05,
+main = paste(tax,"CPL Gene dendrogram >", thres,"%"))
+
+```
+
+
+```{r}
+metadata_df<-metadata[,c("DA","Mean_Temp","Mean_Salinity","Mean_Chl","shannon_entropy_prokaryotes",
+                         "shannon_entropy_eukaryotes","shannon_entropy_auto")]
+Samples <- rownames(input_mat)
+sampleRows <- match(Samples, rownames(metadata_df))
+metadata_df<- metadata_df[sampleRows,]
+```
+
+
+```{r}
+nGenes = ncol(input_mat)
+nSamples = nrow(input_mat)
+MEs<-orderMEs(MEs)
+module.trait.correlation = cor(MEs, metadata_df,use = 'p', method = 'spearman') #p for pearson correlation coefficient 
+module.trait.Pvalue = corPvalueStudent(module.trait.correlation, nSamples)
+module=names(MEs) %>% gsub("ME","", .)
+textMatrix = paste(signif(module.trait.correlation, 2), "\n(",signif(module.trait.Pvalue, 1), ")", sep = "")
+dim(textMatrix) = dim(module.trait.correlation)
+mat<-module.trait.correlation
+
+png(filename = paste0("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/WGCNA/Auto_005_Jan4_run/",tax,"_",thres,"_Module-Trait_Relationship.png"),
+    width = 20, height = 18, res=300, unit="cm")
+annotationMatrix <- ifelse(module.trait.Pvalue < 0.05, "*", "")
+par(mar = c(9, 7, 2, 2))
+labeledHeatmap(Matrix = mat,
+xLabels = names(metadata_df),
+yLabels = names(MEs),
+ySymbols = module,
+colorLabels = FALSE,colors = blueWhiteRed(50),
+textMatrix = annotationMatrix,setStdMargins = FALSE,
+cex.text = 1.5,zlim = c(-1,1),
+main = paste(tax,"MCL_cluster Module-trait relationships CPL", thres,"%"))
+```
+
+
+```{r}
+### renaming the parameters ######
+
+salinity = as.data.frame(metadata_df$Mean_Salinity);
+names(salinity) = "salinity"
+chl = as.data.frame(metadata_df$Mean_Chl);
+names(chl) = "chloropyhll"
+temp = as.data.frame(metadata_df$Mean_Temp);
+names(temp) = "temperature"
+
+### Plotting the heatmaps ######
+MEs<-orderMEs(cbind(MEs,salinity,chl,temp))
+par(cex = 0.9)
+plotEigengeneNetworks(MEs, "", marDendro = c(0,4,1,2), marHeatmap = c(5,6,1,2), cex.lab = 0.8, xLabelsAngle
+= 90)
+
+par(cex = 1.0)
+plotEigengeneNetworks(MEs,paste(tax,"Eigengene Dendrogram"), marDendro = c(0,4,2,0),
+plotHeatmaps = FALSE)
+
+par(cex = 1.0, mar = c(4,4,1,1))
+plotEigengeneNetworks(MEs, paste(tax,"Eigengene adjacency heatmap"), marHeatmap = c(7,7,2,2),
+plotDendrograms = FALSE, xLabelsAngle = 90)
+```
+identify hub genes, i.e genes with the highest connectivity to each modules
+```{r}
+topHubs <- chooseTopHubInEachModule(input_mat, ModuleColors, power = picked_power,type = "signed")
+
+adjacencyMatrix <- adjacency(input_mat, power = picked_power, type = "signed")
+IMC <- intramodularConnectivity(adjacencyMatrix, mergedColors)
+
+geneInfo <- data.frame(
+    Gene = colnames(input_mat),
+    Module = mergedColors,
+    Connectivity = IMC$kWithin
+)
+rankedGenes <- geneInfo %>%
+  arrange(Module, desc(Connectivity)) %>%
+  group_by(Module) %>%
+  mutate(Rank = row_number())
+topGenes <- rankedGenes %>% filter(Rank <= 20) 
+
+### Module membership, identifying correlation of genes to the modules
+kME_table <- signedKME(input_mat,
+                       MEs,
+                       corFnc = "cor", 
+                       corOptions = "use = 'p'")#, method = 'spearman'")
+
+# Extract kME for each gene relative to its assigned module
+kME_assigned <- sapply(1:ncol(input_mat), function(i) {
+  module <- mergedColors[i]
+  kME_table[i, paste0("kME", module)]  # Extract kME for the gene's assigned module
+})
+
+# Create a data frame with kME and module information
+kME_results <- data.frame(
+  Gene = colnames(input_mat),
+  Module = mergedColors,
+  kME = kME_assigned
+)
+head(kME_results)
+
+#Kleinberg hub and authority score for a network
+#in TOM, the adjacency matrix is symetrical, thus hub and authority scores are the same, only in directed network, the scores are #different
+
+adjacency <- adjacency(input_mat, power = picked_power,type = "signed")
+TOM <- TOMsimilarity(adjacency, TOMType = "signed")
+
+rownames(TOM) <- colnames(input_mat)
+colnames(TOM) <- colnames(input_mat)
+network <- graph.adjacency(TOM, mode = "directed", weighted = TRUE, diag = FALSE)
+
+# Add signed weights
+E(network)$weight <- E(network)$weight * sign(E(network)$weight)
+# Add module color information
+V(network)$ModuleColor <- mergedColors[V(network)$name]
+
+hub_scores <- hub_score(network, weights = E(network)$weight)$vector
+#authority_scores <- authority_score(network, weights = E(network)$weight)$vector
+
+# Combine scores with gene and module color information
+clust_scores <- data.frame(
+  cluster = names(hub_scores),
+  HubScore = hub_scores,
+  #AuthorityScore = authority_scores,
+  ModuleColor = mergedColors
+)
+# write.csv(clust_scores, "/Users/houlin/Desktop/Ecohab/Ecohab22/metatranscriptoms/WGCNA/hubscores_gene_025.csv", row.names = FALSE)
+
+# Top hubs for each module
+#top_hubs <- clust_scores %>%
+#  group_by(ModuleColor) %>%
+#  arrange(desc(HubScore)) %>%
+#  slice_head(n = 5)
+
+```
+
+
+```{r}
+edge_list <- data.frame(
+  Source = rep(colnames(TOM), each = ncol(TOM)),  # Use the column names as source
+  Target = rep(colnames(TOM), times = ncol(TOM)),  # Use the column names as target
+  weight = as.vector(TOM)  # Adjacency values (e.g., TOM)
+)
+
+# Remove self-loops (edges where a node is connected to itself)
+edge_list <- edge_list[edge_list$Source != edge_list$Target, ]
+edge_list_filtered<-edge_list[edge_list$weight>0.5,]
+
+savepath<-"/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/WGCNA/"
+write.csv(edge_list, paste0(savepath,tax,"_network_edges_",thres,".csv"), row.names = FALSE)
+write.csv(edge_list_filtered, paste0(savepath,tax,"_network_edges_filtered_",thres,".csv"), row.names = FALSE)
+```
+
+```{r}
+#pull out the list of the modules
+today <- Sys.Date()
+module_df <- data.frame(
+  gene_id = names(netwk$colors),
+  Modules = labels2colors(netwk$colors),
+  new_colors= New_mergedColors
+  #Connectivity = IMC$kWithin,
+  #kME = kME_assigned,
+  #hubscore=hub_scores
+)  
+# save the results as csv for further analysis
+savepath<-"/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/WGCNA/"
+write.csv(module_df,paste0(savepath,tax,"_MCL_cluster_modules_",thres,"_",today,".csv"),row.names = FALSE) 
+```
+
+#visualize the network produced by the WGCNA TOM
+```{r}
+TOMp<-TOM
+TOMp[TOMp<0.6]=0
+network_graph <- graph.adjacency(TOMp, mode = "undirected", weighted = TRUE, diag = FALSE)
+V(network_graph)$color <- as.factor(mergedColors)
+V(network_graph)$size <- degree(network_graph, mode = "all")
+plot(network_graph, 
+     vertex.size = V(network_graph)$size,  # Node size by degree
+     vertex.color = V(network_graph)$color, # Node color by module
+     vertex.label.cex = 0.6,               # Adjust label size
+     edge.width = 0.5,                    # Edge width
+     main = "WGCNA Network - Genes by Module Colors")
+```
+
+

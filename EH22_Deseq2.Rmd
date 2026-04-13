@@ -8,6 +8,7 @@ date: "2024-09-06"
 knitr::opts_chunk$set(echo = FALSE)
 knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 library(DESeq2)
+library("readr")
 library(tidyverse)
 library(Matrix)
 library(igraph)
@@ -29,9 +30,7 @@ This size factor scales the counts for each sample, allowing for effective norma
 
 ```{r Import all datasets}
 setwd("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms")
-genecounts<- read.csv("genecounts/Ecohab22_genecounts_annotation.csv",row.names=1)
-#cpl.data <- read.csv("CPL/EcoHAB22-CPL-norm-clustered-filtered-taxfull.csv",row.names="geneID")
-#auto.cpl<- read.csv("df_autotrophs_cpl.csv",row.names="geneID")
+genecounts <- read.delim("genecounts/Ecohab22_genecounts_annotation.tsv", row.names = 1, sep = "\t")
 metadata <- read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/data/Ecohab22_metadata_042125.csv",row.names = 'sample.id')
 rows_to_drop <- c("EH16_0070", "EH15_0064")
 # Drop rows with specified row names
@@ -40,27 +39,48 @@ cluster_annotate<-read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metat
 ```
 
 ```{r}
-tpm<- read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/Ecohab22_TPM_annotated-taxfull.csv",row.names=1)
-annotation<-tpm[97:119]
+### subset to diatom ####
+auto_list <- c('Archaeplastida', 'Cryptophyta', 'Haptophyta', 'Ochrophyta', 'Dinophyceae', 'Noctilucophyceae','Stramenopiles')
+pattern <- paste(auto_list, collapse = "|")
+data <- genecounts[grepl(pattern, genecounts$LPI_taxonomy),]
+row_names <- rownames(data)
+### group by taxonomy group and pfam description ####
+data <- data %>%
+  mutate(Pfam_original = Pfam) %>%                               # keep a copy
+  mutate(across(c(Pfam, ISIP_gene, N_gene,dab_gene,sil_gene), \(x) {
+    x <- as.character(x)                                         # drop factors
+    x <- trimws(x)                                               # remove spaces
+    x[x == ""] <- NA                                             # empty -> NA
+    x[x %in% c("NA", "NaN", "None")] <- NA                       # strings -> NA
+    x
+  })) %>%
+  mutate(Pfam = coalesce(ISIP_gene, N_gene,dab_gene,sil_gene, Pfam)) %>%                 # iron > nitro > Pfam
+  ungroup()
+
+df_sum <- data %>%
+  mutate(Pfam = ifelse(is.na(Pfam), "nan", Pfam)) %>%
+  group_by(Class, Pfam) %>%
+  summarise(across(4:66, sum, na.rm = TRUE))
+
+df_sum <- df_sum %>%
+  mutate(ID = paste(Class, Pfam, sep = "_")) %>%
+  select(ID, everything(), -Class, -Pfam) %>%
+  as.data.frame() %>%
+  column_to_rownames("ID")
+
+# df_sum <- data %>%
+#   mutate(Pfam = ifelse(is.na(Pfam), "nan", Pfam)) %>%
+#   group_by(Pfam) %>%
+#   summarise(across(4:66, sum, na.rm = TRUE))%>%
+#   as.data.frame()%>%
+#   column_to_rownames("Pfam")
+
+metadata <- metadata[(rownames(metadata) %in% colnames(df_sum)), ]
+df_sum<-df_sum[,rownames(metadata)]
+
 ```
-
-```{r}
-silA_gene<-read.csv("/Users/houlin/Desktop/Research/Ecohab/Ecohab22/metatranscriptoms/SiLA_gene.csv",row.names=1)
-annotation<- merge(annotation, silA_gene, by = "row.names", all.x = TRUE)
-rownames(annotation) <- annotation$Row.names
-annotation$Row.names <- NULL
-```
-
-
 
 ```{r pressure, echo=FALSE}
-#data<-genecounts[4:66]
-diatom_counts <- genecounts[grepl("Bacillariophyta", genecounts$LPI_taxonomy), 4:66]
-data<-diatom_counts
-row_names <- rownames(data)
-metadata <- metadata[(rownames(metadata) %in% colnames(data)), ]
-data<-data[,rownames(metadata)]
-#rownames(data) <- row_names
 metadata$Diatom_clusters <- factor(
   metadata$Diatom_clusters,
   levels = c(0, 1, 2),
@@ -70,7 +90,8 @@ dds <- DESeqDataSetFromMatrix(countData = data,
                               colData = metadata,
                               design = ~ Diatom_clusters)
 # filter by keeping genes with sum above 10 counts
-keep <- rowSums(counts(dds)) >= 10
+keep <- rowSums(counts(dds)) >= 10 &
+        rowSums(counts(dds) > 0) >= (0.2 * ncol(dds))
 dds <- dds[keep, ]
 dds<- estimateSizeFactors(dds)
 normalized_counts <- counts(dds, normalized=TRUE)
@@ -102,7 +123,7 @@ for (i in 1:(length(treatment_levels) - 1)){
     comparison_name <- paste(treatment_levels[i], "_vs_", treatment_levels[j], sep = "")
     par(mfrow=c(1,2), mar=c(4,4,2,1))
     plotMA(res, main="raw")
-    plotMA(resLFC, main="apelgm")
+    plotMA(resLFC, main="normal")
     print(comparison_name)
     mtext(comparison_name, side=3, line=1, outer=TRUE, cex=1.5)
     results_list[[comparison_name]] <- res
@@ -116,6 +137,7 @@ for (i in 1:(length(treatment_levels) - 1)){
   }
 }
 ```
+
 ```{r}
 treatment_levels <- levels(dds.results$Diatom_clusters)
 comparison_name <- paste(treatment_levels[2], "_vs_", treatment_levels[3], sep = "")
